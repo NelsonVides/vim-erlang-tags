@@ -135,15 +135,24 @@ reparse_arguments(Args) ->
 fill_args(Opts, []) ->
     Opts;
 fill_args(Opts, [Arg | OtherArgs]) ->
-    {ok, Param} = parse_arg(Arg),
-    {StateArgs, Rest} = consume_until_new_state(OtherArgs),
-    case StateArgs of
-        [] -> log_error("Arguments needed for ~s.~n", [Arg]);
-        _ -> ok
-    end,
+    {ok, Param, Args} = case parse_arg(Arg) of
+                            {ok, P} -> {ok, P, OtherArgs};
+                            {include, I} -> {ok, include, [I|OtherArgs]}
+                        end,
+    {StateArgs, Rest} = get_full_arg_state(Param, Args),
     fill_args(Opts#{Param := maps:get(Param, Opts, []) ++ StateArgs}, Rest).
 
--spec parse_arg(string()) -> {ok, atom()} | {error, unrecognised_parameter}.
+get_full_arg_state(S, Args) when S =:= otp; S =:= help; S =:= verbose ->
+    {[], Args};
+get_full_arg_state(S, Args) ->
+    {StateArgs, _Rest} = Ret = consume_until_new_state(Args),
+    case StateArgs of
+        [] -> log_error("Arguments needed for ~s.~n", [S]);
+        _ -> ok
+    end,
+    Ret.
+
+-spec parse_arg(string()) -> {ok, atom()} | {include, term()} | {error, unrecognised_parameter}.
 parse_arg(Arg) ->
     lists:foldl(
       fun({State, StateList}, Acc) ->
@@ -152,7 +161,7 @@ parse_arg(Arg) ->
                   _ -> Acc
               end
       end,
-      {error, unrecognised_parameter},
+      {include, Arg},
       allowed_commands()).
 
 -spec consume_until_new_state([string()]) -> {[string()], [string()]}.
