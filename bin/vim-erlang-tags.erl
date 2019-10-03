@@ -134,23 +134,15 @@ reparse_arguments(Args) ->
 -spec fill_args(args(), [string()]) -> args().
 fill_args(Opts, []) ->
     Opts;
-fill_args(Opts, [Arg | OtherArgs]) ->
-    {ok, Param, Args} = case parse_arg(Arg) of
-                            {ok, P} -> {ok, P, OtherArgs};
-                            {include, I} -> {ok, include, [I|OtherArgs]}
-                        end,
-    {StateArgs, Rest} = get_full_arg_state(Param, Args),
+fill_args(Opts, [Arg | OtherArgs] = Args) ->
+    {ok, Param, ParsedArgs} =
+        case parse_arg(Arg) of
+            {ok, P} -> {ok, P, OtherArgs};
+            %% If the parameter is not recognised, just throw it into include
+            {include, Arg} -> {ok, include, Args}
+        end,
+    {StateArgs, Rest} = get_full_arg_state(Param, ParsedArgs),
     fill_args(Opts#{Param := maps:get(Param, Opts, []) ++ StateArgs}, Rest).
-
-get_full_arg_state(S, Args) when S =:= otp; S =:= help; S =:= verbose ->
-    {[], Args};
-get_full_arg_state(S, Args) ->
-    {StateArgs, _Rest} = Ret = consume_until_new_state(Args),
-    case StateArgs of
-        [] -> log_error("Arguments needed for ~s.~n", [S]);
-        _ -> ok
-    end,
-    Ret.
 
 -spec parse_arg(string()) -> {ok, atom()} | {include, term()} | {error, unrecognised_parameter}.
 parse_arg(Arg) ->
@@ -161,14 +153,25 @@ parse_arg(Arg) ->
                   _ -> Acc
               end
       end,
-      {include, Arg},
+      {include, Arg}, %% If the parameter is not recognised, just throw it into include
       allowed_commands()).
+
+-spec get_full_arg_state(atom(), [string()]) -> {[string()], [string()]}.
+get_full_arg_state(S, Args) when S =:= otp; S =:= help; S =:= verbose ->
+    {[], Args};
+get_full_arg_state(S, Args) ->
+    log("Parsing Args for State ~p~n", [S]),
+    {StateArgs, _Rest} = Ret = consume_until_new_state(Args),
+    case StateArgs of
+        [] -> log_error("Arguments needed for ~s.~n", [S]);
+        _ -> ok
+    end,
+    Ret.
 
 -spec consume_until_new_state([string()]) -> {[string()], [string()]}.
 consume_until_new_state(Args) ->
     log("Args are ~p~n", [Args]),
     States = lists:foldl(fun({_,S}, Acc) -> S ++ Acc end, [], allowed_commands()),
-    log("States are ~p~n", [States]),
     lists:splitwith(
       fun("-" ++ _ = El) ->
               case lists:member(El, States) of
@@ -176,7 +179,6 @@ consume_until_new_state(Args) ->
                   _ -> log_error("Unknown argument: ~s~n", [El]), halt(1)
               end;
          (El) ->
-              log("Element is ~p~n", [El]),
               not lists:member(El, States)
       end, Args).
 
@@ -202,9 +204,10 @@ clean_opts(#{include := Included, ignore := Ignored}) ->
     log("Set includes to default current dir.~n"),
     #{explore => expand_includes_remove_ignored(Included, Ignored)}.
 
-%% TODO: do ignore the ignored files :(
-expand_includes_remove_ignored(Included, _Ignored) ->
-    lists:foldl(fun(L,Acc) -> L++Acc end,[],expand_dirs(Included)).
+expand_includes_remove_ignored(Included, Ignored) ->
+    AllIncluded = lists:foldl(fun(L,Acc) -> L++Acc end,[],expand_dirs(Included)),
+    AllIgnored = lists:foldl(fun(L,Acc) -> L++Acc end,[],expand_dirs(Ignored)),
+    lists:subtract(AllIncluded, AllIgnored).
 
 -spec expand_dirs([string()]) -> [ [] | [file:filename()] ].
 expand_dirs(Included) ->
