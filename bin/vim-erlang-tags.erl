@@ -90,7 +90,7 @@
 
 -type config() ::
     #{explore := list(),
-      output := list()
+      output := string()
      }.
 
 allowed_commands() ->
@@ -110,9 +110,9 @@ main(Args) ->
 
 run(#{help := true}) ->
     print_help();
-run(#{explore := _Explore} = Opts) ->
-    Tags = create_tags(Opts),
-    ok = tags_to_file(Tags, maps:get(output, Opts, "tags")),
+run(#{explore := Explore, output := TagFile}) ->
+    Tags = create_tags(Explore),
+    ok = tags_to_file(Tags, TagFile),
     ets:delete(Tags).
 
 -spec reparse_arguments([string()]) -> args().
@@ -189,9 +189,9 @@ clean_opts(#{output := []} = Opts0) ->
 clean_opts(#{include := []} = Opts0) ->
     log("Set includes to default current dir.~n"),
     clean_opts(Opts0#{include := [?DEFAULT_PATH]});
-clean_opts(#{include := Included, ignore := Ignored}) ->
+clean_opts(#{include := Included, ignore := Ignored, output := [Output]}) ->
     log("Set includes to default current dir.~n"),
-    #{explore => expand_includes_remove_ignored(Included, Ignored)}.
+    #{explore => expand_includes_remove_ignored(Included, Ignored), output => Output}.
 
 expand_includes_remove_ignored(Included, Ignored) ->
     AllIncluded = lists:foldl(fun(L,Acc) -> L++Acc end,[],expand_dirs(Included)),
@@ -221,22 +221,21 @@ expand_dirs(Included) ->
 %%%================================================================================================
 
 % Read the given Erlang source files and return an ets table that contains the appropriate tags.
-create_tags(#{explore := Explore}) ->
+create_tags(Explore) ->
     log("In create_tags, To explore: ~p~n", [Explore]),
-    Tags = ets:new(tags, [set]),
+    EtsTags = ets:new(tags, [set]),
     log("Tags table created.~n"),
-    process_filenames(Explore, Tags),
-    Tags.
+    process_filenames(Explore, EtsTags),
+    EtsTags.
 
 
 % Go through the given files: scan the Erlang files for tags
-% and traverse the directories for further Erlang files.
 % Here we now for sure that `Files` are indeed files with extensions *.erl or *.hrl.
 process_filenames([], _Tags) ->
     ok;
-process_filenames([File|OtherFiles], Tags) ->
-    add_tags_from_file(File, Tags),
-    process_filenames(OtherFiles, Tags).
+process_filenames([File|OtherFiles], EtsTags) ->
+    add_tags_from_file(File, EtsTags),
+    process_filenames(OtherFiles, EtsTags).
 
 %%%=============================================================================
 %%% Scan a file or line for tags
@@ -400,25 +399,21 @@ tags_to_file(Tags, TagsFile) ->
 tag_to_binary({{Tag, File, Scope, Kind}, TagAddress}) ->
     ScopeStr =
     case Scope of
-        global ->
-            "";
-        local ->
-            "\tfile:"
+        global -> "";
+        local -> "\tfile:"
     end,
-    iolist_to_binary( [Tag, "\t",
-                       File, "\t",
-                       TagAddress, ";\"\t",
-                       Kind,
-                       ScopeStr, "\n"]).
+    iolist_to_binary([Tag, "\t",
+                      File, "\t",
+                      TagAddress, ";\"\t",
+                      Kind,
+                      ScopeStr, "\n"]).
 
 %%%=============================================================================
 %%% Utility functions
 %%%=============================================================================
 
-% From http://www.trapexit.org/Trimming_Blanks_from_String
 log(Format) ->
     log(Format, []).
-
 log(Format, Data) ->
     case get(verbose) of
         true ->
@@ -426,9 +421,6 @@ log(Format, Data) ->
         _ ->
             ok
     end.
-
-%log_error(Format) ->
-%    log_error(Format, []).
 
 log_error(Format, Data) ->
     io:format(standard_error, Format, Data).
