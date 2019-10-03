@@ -157,13 +157,13 @@ parse_arg(Arg) ->
 
 -spec consume_until_new_state([string()]) -> {[string()], [string()]}.
 consume_until_new_state(Args) ->
-    log("Arg is ~s~n", [Args]),
+    log("Args are ~p~n", [Args]),
     States = lists:foldl(fun({_,S}, Acc) -> S ++ Acc end, [], allowed_commands()),
     log("States are ~p~n", [States]),
     lists:splitwith(
       fun("-" ++ _ = El) ->
               case lists:member(El, States) of
-                  true -> true;
+                  true -> false;
                   _ -> log_error("Unknown argument: ~s~n", [El]), halt(1)
               end;
          (El) ->
@@ -176,7 +176,7 @@ clean_opts(#{help := [_]}) ->
     #{help => true};
 clean_opts(#{otp := ["true"], include := Inc} = Opts0) ->
     log("Including OTP in.~n"),
-    AllIncludes = code:lib_dir() ++ Inc,
+    AllIncludes = [code:lib_dir() | Inc],
     Opts1 = maps:update(include, AllIncludes, Opts0),
     Opts2 = maps:update(otp, [], Opts1),
     clean_opts(Opts2);
@@ -195,19 +195,20 @@ clean_opts(#{include := Included, ignore := Ignored}) ->
 
 %% TODO: do ignore the ignored files :(
 expand_includes_remove_ignored(Included, _Ignored) ->
-    [All] = expand_dirs(Included),
-    All.
+    lists:foldl(fun(L,Acc) -> L++Acc end,[],expand_dirs(Included)).
 
 -spec expand_dirs([string()]) -> [ [] | [file:filename()] ].
 expand_dirs(Included) ->
     lists:map(
       fun(FileName) ->
               case filelib:is_file(FileName) of
-                  false -> [];
+                  false ->
+                          log_error("FileName: ~p~n", [FileName]),
+                          [];
                   _ ->
                       case filelib:is_dir(FileName) of
                           true ->
-                              filelib:wildcard(FileName ++ "/**.{erl,hrl}");
+                              filelib:wildcard(FileName ++ "/**/*.{erl,hrl}");
                           _ -> FileName
                       end
               end
@@ -220,7 +221,7 @@ expand_dirs(Included) ->
 
 % Read the given Erlang source files and return an ets table that contains the appropriate tags.
 create_tags(#{explore := Explore}) ->
-    log_error("To explore: ~p~n", [Explore]),
+    log("In create_tags, To explore: ~p~n", [Explore]),
     Tags = ets:new(tags, [set]),
     log("Tags table created.~n"),
     process_filenames(Explore, Tags),
