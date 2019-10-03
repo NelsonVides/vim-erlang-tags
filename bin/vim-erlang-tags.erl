@@ -230,7 +230,7 @@ create_tags(Explore) ->
                        {read_concurrency,false}
                       ]),
     log("EtsTags table created.~n"),
-    log_error("Starting prrocessing of files~n", []),
+    log("Starting processing of files~n", []),
     Processes = process_filenames(Explore, EtsTags, []),
     lists:foreach(
       fun({Pid, Ref}) ->
