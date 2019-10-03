@@ -223,19 +223,33 @@ expand_dirs(Included) ->
 % Read the given Erlang source files and return an ets table that contains the appropriate tags.
 create_tags(Explore) ->
     log("In create_tags, To explore: ~p~n", [Explore]),
-    EtsTags = ets:new(tags, [set]),
+    EtsTags = ets:new(tags,
+                      [set,
+                       public,
+                       {write_concurrency,true},
+                       {read_concurrency,false}
+                      ]),
     log("EtsTags table created.~n"),
-    process_filenames(Explore, EtsTags),
+    log_error("Starting prrocessing of files~n", []),
+    Processes = process_filenames(Explore, EtsTags, []),
+    lists:foreach(
+      fun({Pid, Ref}) ->
+              receive
+                  {'DOWN', Ref, process, Pid, normal} -> ok
+              after 5000 -> error("Some process takes to long")
+              end
+      end,
+      Processes),
     EtsTags.
 
 
 % Go through the given files: scan the Erlang files for tags
 % Here we now for sure that `Files` are indeed files with extensions *.erl or *.hrl.
-process_filenames([], _Tags) ->
-    ok;
-process_filenames([File|OtherFiles], EtsTags) ->
-    add_tags_from_file(File, EtsTags),
-    process_filenames(OtherFiles, EtsTags).
+process_filenames([], _Tags, Processes) ->
+    Processes;
+process_filenames([File|OtherFiles], EtsTags, Processes) ->
+    P = spawn_monitor(fun() -> add_tags_from_file(File, EtsTags) end),
+    process_filenames(OtherFiles, EtsTags, [P | Processes]).
 
 %%%=============================================================================
 %%% Scan a file or line for tags
