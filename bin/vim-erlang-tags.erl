@@ -104,6 +104,7 @@ allowed_commands() ->
     ].
 
 main(Args) ->
+    log("Entering main. Args are ~p~n~n", [Args]),
     Opts0 = reparse_arguments(Args),
     Opts = clean_opts(Opts0),
     run(Opts).
@@ -210,7 +211,7 @@ expand_dirs(Included) ->
                       case filelib:is_dir(FileName) of
                           true ->
                               filelib:wildcard(FileName ++ "/**/*.{erl,hrl}");
-                          _ -> FileName
+                          _ -> [FileName]
                       end
               end
       end,
