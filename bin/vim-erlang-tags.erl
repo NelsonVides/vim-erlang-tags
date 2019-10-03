@@ -91,193 +91,156 @@
 
 -define(DEFAULT_PATH, ".").
 
+-type args() ::
+    #{include := list(),
+      ignore := list(),
+      output := list(),
+      otp := list(),
+      help := list()
+     }.
+
+-type config() ::
+    #{explore := list(),
+      output := list()
+     }.
+
+allowed_commands() ->
+    [
+     {include, ["-i", "--include", "--"]},
+     {ignore,  ["-g", "--ignore"]},
+     {output,  ["-o", "--output"]},
+     {otp,     ["-p", "--otp"]},
+     {verbose, ["-v", "--verbose"]},
+     {help,    ["-h", "--help"]}
+    ].
+
 main(Args) ->
-    % Process arguments
-    put(files, []),
-    put(tagsfilename, "tags"),
-    put(ignored, []),
-    put(incl_otp, false),
-    parse_args(Args),
-    ArgFiles =
-        case get(files) of
-            [] ->
-                [?DEFAULT_PATH];
-            Other ->
-                Other
-        end,
+    Opts0 = reparse_arguments(Args),
+    Opts = clean_opts(Opts0),
+    run(Opts).
 
-    Files =
-        case get(incl_otp) of
-            true -> [code:lib_dir()|ArgFiles];
-            false -> ArgFiles
-        end,
-
-    Tags = create_tags(Files),
-    ok = tags_to_file(Tags, get(tagsfilename)),
+run(#{help := true}) ->
+    print_help();
+run(#{explore := _Explore} = Opts) ->
+    Tags = create_tags(Opts),
+    ok = tags_to_file(Tags, maps:get(output, Opts, "tags")),
     ets:delete(Tags).
 
-%% I know that using the process dictionary is not very nice...
-parse_args([]) ->
-    ok;
-parse_args(["-"|OtherArgs]) ->
-    put(files, [stdin|get(files)]),
-    parse_args(OtherArgs);
-parse_args([Help|_]) when Help == "-h";
-                          Help == "--help" ->
-    print_help(),
-    halt(0);
-parse_args([Verbose|OtherArgs]) when Verbose == "-v";
-                                     Verbose == "--verbose" ->
-    put(verbose, true),
-    log("Verbose mode on.~n"),
-    parse_args(OtherArgs);
-parse_args([InclOTP|OtherArgs]) when InclOTP == "-p";
-                                     InclOTP == "--otp" ->
-    put(incl_otp, true),
+-spec reparse_arguments([string()]) -> args().
+reparse_arguments(Args) ->
+    EmptyOpts = #{include => [], ignore => [], output => [], otp => [], verbose => [], help => []},
+    fill_args(EmptyOpts, Args).
+
+-spec fill_args(args(), [string()]) -> args().
+fill_args(Opts, []) ->
+    Opts;
+fill_args(Opts, [Arg | OtherArgs]) ->
+    {ok, Param} = parse_arg(Arg),
+    {StateArgs, Rest} = consume_until_new_state(OtherArgs),
+    case StateArgs of
+        [] -> log_error("Arguments needed for ~s.~n", [Arg]);
+        _ -> ok
+    end,
+    fill_args(Opts#{Param := maps:get(Param, Opts, []) ++ StateArgs}, Rest).
+
+-spec parse_arg(string()) -> {ok, atom()} | {error, unrecognised_parameter}.
+parse_arg(Arg) ->
+    lists:foldl(
+      fun({State, StateList}, Acc) ->
+              case lists:member(Arg, StateList) of
+                  true -> {ok, State};
+                  _ -> Acc
+              end
+      end,
+      {error, unrecognised_parameter},
+      allowed_commands()).
+
+-spec consume_until_new_state([string()]) -> {[string()], [string()]}.
+consume_until_new_state(Args) ->
+    log("Arg is ~s~n", [Args]),
+    States = lists:foldl(fun({_,S}, Acc) -> S ++ Acc end, [], allowed_commands()),
+    log("States are ~p~n", [States]),
+    lists:splitwith(
+      fun("-" ++ _ = El) ->
+              case lists:member(El, States) of
+                  true -> true;
+                  _ -> log_error("Unknown argument: ~s~n", [El]), halt(1)
+              end;
+         (El) ->
+              log("Element is ~p~n", [El]),
+              not lists:member(El, States)
+      end, Args).
+
+-spec clean_opts(args()) -> config().
+clean_opts(#{help := [_]}) ->
+    #{help => true};
+clean_opts(#{otp := ["true"], include := Inc} = Opts0) ->
     log("Including OTP in.~n"),
-    parse_args(OtherArgs);
-parse_args([Output, TagsFileName|OtherArgs]) when Output == "-o";
-                                                  Output == "--output" ->
-    put(tagsfilename, TagsFileName),
-    parse_args(OtherArgs);
-parse_args([Output]) when Output == "-o";
-                          Output == "--output";
-                          Output == "-i";
-                          Output == "--ignore" ->
-    log_error("More argument needed after ~s.~n", [Output]),
-    halt(1);
-parse_args([Ignored, Name|OtherArgs]) when Ignored == "-i";
-                                           Ignored == "--ignore" ->
-    Files = filelib:wildcard(Name),
-    AllIgnored = case get(ignored) of
-        undefined -> Files;
-        OldFiles -> OldFiles ++ [ filename:absname(N, ?DEFAULT_PATH) || N <- Files ]
-    end,
-    put(ignored, AllIgnored),
-    parse_args(OtherArgs);
-parse_args(["-" ++ Arg|_]) ->
-    log_error("Unknown argument: ~s~n", [Arg]),
-    halt(1);
-parse_args([FileName|OtherArgs]) ->
-    put(files, [FileName|get(files)]),
-    parse_args(OtherArgs).
+    AllIncludes = code:lib_dir() ++ Inc,
+    Opts1 = maps:update(include, AllIncludes, Opts0),
+    Opts2 = maps:update(otp, [], Opts1),
+    clean_opts(Opts2);
+clean_opts(#{verbose := [_]} = Opts0) ->
+    log("Verbose mode on.~n"),
+    clean_opts(Opts0#{verbose := true});
+clean_opts(#{output := []} = Opts0) ->
+    log("Set output to default 'tags'.~n"),
+    clean_opts(Opts0#{output := ["tags"]});
+clean_opts(#{include := []} = Opts0) ->
+    log("Set includes to default current dir.~n"),
+    clean_opts(Opts0#{include := [?DEFAULT_PATH]});
+clean_opts(#{include := Included, ignore := Ignored}) ->
+    log("Set includes to default current dir.~n"),
+    #{explore => expand_includes_remove_ignored(Included, Ignored)}.
 
-print_help() ->
-    Help =
-"Usage: vim-erlang-tags.erl [-h|--help] [-v|--verbose] [-] [-o|--output FILE]
-                            DIR_OR_FILE...
+%% TODO: do ignore the ignored files :(
+expand_includes_remove_ignored(Included, _Ignored) ->
+    [All] = expand_dirs(Included),
+    All.
 
-Description:
-  vim-erlang-tags.erl creates a tags file that can be used by Vim. The
-  directories given as arguments are searched (recursively) for *.erl and *.hrl
-  files, which will be scanned. The files given as arguments are also scanned.
-  The default is to search in the current directory.
+-spec expand_dirs([string()]) -> [ [] | [file:filename()] ].
+expand_dirs(Included) ->
+    lists:map(
+      fun(FileName) ->
+              case filelib:is_file(FileName) of
+                  false -> [];
+                  _ ->
+                      case filelib:is_dir(FileName) of
+                          true ->
+                              filelib:wildcard(FileName ++ "/**.{erl,hrl}");
+                          _ -> FileName
+                      end
+              end
+      end,
+      Included).
 
-Options:
-  -h, --help    Print help and exit.
-  -v, --verbose Verbose output.
-  -             Read the list of files from the standard input.
-  -o, --output FILE
-                Write the output into the given file instead of ./tags.
-  -i, --ignore FILE_WILDCARD
-                Ignore the files/directories that match the given wildcard.
-                Read http://www.erlang.org/doc/man/filelib.html#wildcard-1 for
-                the wildcard patterns.
-  -p, --otp     Include the currently used OTP lib_dir
-
-Example:
-  $ vim-erlang-tags.erl
-  $ vim-erlang-tags.erl .  # Same
-  $ find . -name '*.[he]rl' | vim-erlang-tags.erl -  # Equivalent to the above
-  $ vim-erlang-tags.erl /path/to/project1 /path/to/project2
-",
-    io:format("~s", [Help]).
-
-%%%=============================================================================
+%%%================================================================================================
 %%% Create tags from directory trees and file lists
-%%%=============================================================================
+%%%================================================================================================
 
-% Read the given Erlang source files and return an ets table that contains the
-% appropriate tags.
-create_tags(Files) ->
-    Tags = ets:new(tags, [ordered_set]),
+% Read the given Erlang source files and return an ets table that contains the appropriate tags.
+create_tags(#{explore := Explore}) ->
+    log_error("To explore: ~p~n", [Explore]),
+    Tags = ets:new(tags, [set]),
     log("Tags table created.~n"),
-
-    {StdIn, RealFiles} =
-        lists:partition(
-          fun(stdin) -> true;
-             (_) -> false
-          end, Files),
-
-    case StdIn of
-        [] ->
-            ok;
-        _ ->
-            process_filenames_from_stdin(Tags)
-    end,
-
-    process_filenames(RealFiles, Tags),
-
+    process_filenames(Explore, Tags),
     Tags.
 
-% Read file names for stdin and scan the files for tags.
-process_filenames_from_stdin(Tags) ->
-    case io:get_line(standard_io, "") of
-        eof ->
-            ok;
-        Line ->
-            File = trim(Line),
-            log("File to process: ~s~n", [File]),
-            add_tags_from_file(File, Tags),
-            process_filenames_from_stdin(Tags)
-    end.
 
-% Traverse the given directory and scan the Erlang files inside for tags.
-process_dir_tree(Top, Tags) ->
-    IsIgnored = lists:member(Top, get(ignored)),
-    if IsIgnored -> ok;
-       true ->
-            case file:list_dir(Top) of
-                {ok, FileNames} ->
-                    RelFileNames = [filename:join(Top, FileName) ||
-                                    FileName <- FileNames],
-                    process_filenames(RelFileNames, Tags);
-                {error, eacces} ->
-                    log_error("Permission denied: ~s~n", [Top]);
-                {error, enoent} ->
-                    log_error("Directory does not exist: ~s~n", [Top])
-            end
-    end.
-
-% Go through the given files: scan the Erlang files for tags and traverse the
-% directories for further Erlang files.
+% Go through the given files: scan the Erlang files for tags
+% and traverse the directories for further Erlang files.
+% Here we now for sure that `Files` are indeed files with extensions *.erl or *.hrl.
 process_filenames([], _Tags) ->
     ok;
 process_filenames([File|OtherFiles], Tags) ->
-    IsIgnored = lists:member(File, get(ignored)),
-    if IsIgnored -> ok;
-       true ->
-            case filelib:is_dir(File) of
-                true ->
-                    process_dir_tree(File, Tags);
-                false ->
-                    case filename:extension(File) of
-                        Ext when Ext == ".erl";
-                                 Ext == ".hrl" ->
-                            add_tags_from_file(File, Tags);
-                        _ ->
-                            ok
-                    end
-            end
-    end,
+    add_tags_from_file(File, Tags),
     process_filenames(OtherFiles, Tags).
 
 %%%=============================================================================
 %%% Scan a file or line for tags
 %%%=============================================================================
 
-% Read the given Erlang source file and add the appropriate tags to the Tags ets
-% table.
+% Read the given Erlang source file and add the appropriate tags to the Tags ets table.
 add_tags_from_file(File, Tags) ->
     log("~nProcessing file: ~s~n", [File]),
 
@@ -451,9 +414,6 @@ tag_to_binary({{Tag, File, Scope, Kind}, TagAddress}) ->
 %%%=============================================================================
 
 % From http://www.trapexit.org/Trimming_Blanks_from_String
-trim(Input) ->
-    re:replace(Input, "\\s*$", "", [{return, list}]).
-
 log(Format) ->
     log(Format, []).
 
@@ -471,3 +431,33 @@ log(Format, Data) ->
 log_error(Format, Data) ->
     io:format(standard_error, Format, Data).
 
+print_help() ->
+    Help =
+"Usage: vim-erlang-tags.erl [-h|--help] [-v|--verbose] [-] [-o|--output FILE]
+                            DIR_OR_FILE...
+
+Description:
+  vim-erlang-tags.erl creates a tags file that can be used by Vim. The
+  directories given as arguments are searched (recursively) for *.erl and *.hrl
+  files, which will be scanned. The files given as arguments are also scanned.
+  The default is to search in the current directory.
+
+Options:
+  -h, --help    Print help and exit.
+  -v, --verbose Verbose output.
+  -             Read the list of files from the standard input.
+  -o, --output FILE
+                Write the output into the given file instead of ./tags.
+  -i, --ignore FILE_WILDCARD
+                Ignore the files/directories that match the given wildcard.
+                Read http://www.erlang.org/doc/man/filelib.html#wildcard-1 for
+                the wildcard patterns.
+  \-p, --otp     Include the currently used OTP lib_dir
+
+Example:
+  $ vim-erlang-tags.erl
+  $ vim-erlang-tags.erl .  # Same
+  $ find . -name '*.[he]rl' | vim-erlang-tags.erl -  # Equivalent to the above
+  $ vim-erlang-tags.erl /path/to/project1 /path/to/project2
+",
+    io:format("~s", [Help]).
