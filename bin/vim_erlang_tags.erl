@@ -284,12 +284,56 @@ process_filenames([File|OtherFiles], EtsTags, Processes) ->
 %%% Scan a file or line for tags
 %%%=============================================================================
 
+%% from gradualizer
+guess_include_dirs(File) ->
+    Dir = filename:dirname(File),
+    case filename:basename(Dir) of
+        "src" -> [filename:join(Dir, "../include")];
+        _     -> []
+    end ++ [code:lib_dir(App, include) || App <- [erts, kernel, stdlib]].
+
+%% Log warnings for epp errors among the given forms
+%% Bad errors are failed includes due to bad include paths.
+-spec check_epp_errors(file:filename(), Forms :: [tuple()]) -> ok.
+check_epp_errors(File, Forms) ->
+    Errors          = [E || {error, E} <- Forms],
+    MissingIncludes = [F || {_Line, epp, {include, file, F}} <- Errors],
+    if
+        MissingIncludes /= [] ->
+            error_logger:warning_msg("Failed to find the following include"
+                                     " files for ~p:~n~p",
+                                     [File, MissingIncludes]);
+        Errors /= [] ->
+            error_logger:warning_msg("Errors while loading ~p:~n~p",
+                                     [File, Errors]);
+        true ->
+            ok
+    end.
+
+-spec import_erl_file(file:filename()) -> erl_parse:abstract_form().
+import_erl_file(File) ->
+    EppOpts = [{includes, guess_include_dirs(File)}],
+    {ok, Forms} = epp:parse_file(File, EppOpts),
+    check_epp_errors(File, Forms),
+    Forms.
+
+scan_forms(Forms, ModName) ->
+    lists:foreach(fun(Form) -> parse_form(Form, ModName) end, Forms).
+
+parse_form({attribute, _,_,_}, _Mod) ->
+    ok;
+parse_form({function, _,_,_,_}, _Mod) ->
+    ok.
+
 % Read the given Erlang source file and add the appropriate tags to the EtsTags ets table.
 add_tags_from_file(File, EtsTags) ->
     log("~nProcessing file: ~s~n", [File]),
 
     BaseName = filename:basename(File), % e.g. "mymod.erl"
     ModName = filename:rootname(BaseName), % e.g. "mymod"
+    % log_error("try form ~p~n", [import_erl_file(File)]),
+    _Tags = scan_forms(import_erl_file(File), ModName),
+
     add_file_tag(EtsTags, File, BaseName, ModName),
 
     case file:read_file(File) of
@@ -298,6 +342,7 @@ add_tags_from_file(File, EtsTags) ->
     end.
 
 scan_tags(Contents, {EtsTags, File, ModName}) ->
+    % log_error("File~p~nModName~p~n", [File,ModName]),
     scan_tags_core(
       Contents, ?RE_FUNCTIONS,
       fun([_, FuncName]) ->
@@ -334,6 +379,7 @@ scan_tags_core(Contents, Pattern, Fun) ->
         nomatch ->
             ok;
         {match, Matches} ->
+            % log_error("Matches ~p~n", [Matches]),
             lists:foreach(Fun, Matches)
     end.
 
