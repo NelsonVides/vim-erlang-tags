@@ -84,8 +84,9 @@
     #{include := list(),
       ignore := list(),
       output := list(),
-      otp := list(),
-      help := list()
+      otp := boolean(),
+      verbose := boolean(),
+      help := boolean()
      }.
 
 -type config() ::
@@ -118,7 +119,12 @@ run(#{explore := Explore, output := TagFile}) ->
 
 -spec reparse_arguments([string()]) -> args().
 reparse_arguments(Args) ->
-    EmptyOpts = #{include => [], ignore => [], output => [], otp => [], verbose => [], help => []},
+    EmptyOpts = #{include => [],
+                  ignore => [],
+                  output => [],
+                  otp => false,
+                  verbose => false,
+                  help => false},
     fill_args(EmptyOpts, Args).
 
 -spec fill_args(args(), [string()]) -> args().
@@ -132,7 +138,11 @@ fill_args(Opts, [Arg | OtherArgs] = Args) ->
             {include, Arg} -> {ok, include, Args}
         end,
     {StateArgs, Rest} = get_full_arg_state(Param, ParsedArgs),
-    fill_args(Opts#{Param := maps:get(Param, Opts, []) ++ StateArgs}, Rest).
+    NewState = case StateArgs of
+                   true -> true;
+                   In when is_list(In) -> maps:get(Param, Opts, []) ++ In
+               end,
+    fill_args(Opts#{Param := NewState}, Rest).
 
 -spec parse_arg(string()) -> {ok, atom()} | {include, term()} | {error, unrecognised_parameter}.
 parse_arg(Arg) ->
@@ -146,9 +156,9 @@ parse_arg(Arg) ->
       {include, Arg}, %% If the parameter is not recognised, just throw it into include
       allowed_commands()).
 
--spec get_full_arg_state(atom(), [string()]) -> {[string()], [string()]}.
+-spec get_full_arg_state(atom(), [string()]) -> {boolean() | [string()], [string()]}.
 get_full_arg_state(S, Args) when S =:= otp; S =:= help; S =:= verbose ->
-    {[], Args};
+    {true, Args};
 get_full_arg_state(S, Args) ->
     log("Parsing Args for State ~p~n", [S]),
     {StateArgs, _Rest} = Ret = consume_until_new_state(Args),
@@ -175,15 +185,17 @@ consume_until_new_state(Args) ->
 -spec clean_opts(args()) -> config().
 clean_opts(#{help := [_]}) ->
     #{help => true};
-clean_opts(#{otp := ["true"], include := Inc} = Opts0) ->
+clean_opts(#{verbose := true} = Opts0) ->
+    put(verbose, true),
+    log("Verbose mode on.~n"),
+    Opts = maps:update(verbose, false, Opts0),
+    clean_opts(Opts);
+clean_opts(#{otp := true, include := Inc} = Opts0) ->
     log("Including OTP in.~n"),
     AllIncludes = [code:lib_dir() | Inc],
     Opts1 = maps:update(include, AllIncludes, Opts0),
-    Opts2 = maps:update(otp, [], Opts1),
+    Opts2 = maps:update(otp, false, Opts1),
     clean_opts(Opts2);
-clean_opts(#{verbose := [_]} = Opts0) ->
-    log("Verbose mode on.~n"),
-    clean_opts(Opts0#{verbose := true});
 clean_opts(#{output := []} = Opts0) ->
     log("Set output to default 'tags'.~n"),
     clean_opts(Opts0#{output := ["tags"]});
