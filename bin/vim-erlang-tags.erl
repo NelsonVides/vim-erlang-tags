@@ -190,6 +190,9 @@ clean_opts(#{verbose := true} = Opts0) ->
     log("Verbose mode on.~n"),
     Opts = maps:update(verbose, false, Opts0),
     clean_opts(Opts);
+clean_opts(#{include := []} = Opts0) ->
+    log("Set includes to default current dir.~n"),
+    clean_opts(Opts0#{include := [?DEFAULT_PATH]});
 clean_opts(#{otp := true, include := Inc} = Opts0) ->
     log("Including OTP in.~n"),
     AllIncludes = [code:lib_dir() | Inc],
@@ -199,9 +202,6 @@ clean_opts(#{otp := true, include := Inc} = Opts0) ->
 clean_opts(#{output := []} = Opts0) ->
     log("Set output to default 'tags'.~n"),
     clean_opts(Opts0#{output := ["tags"]});
-clean_opts(#{include := []} = Opts0) ->
-    log("Set includes to default current dir.~n"),
-    clean_opts(Opts0#{include := [?DEFAULT_PATH]});
 clean_opts(#{include := Included, ignore := Ignored, output := [Output]}) ->
     log("Set includes to default current dir.~n"),
     #{explore => expand_includes_remove_ignored(Included, Ignored), output => Output}.
