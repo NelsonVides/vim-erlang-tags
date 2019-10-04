@@ -80,21 +80,31 @@
 
 -define(DEFAULT_PATH, ".").
 
--type args() ::
-    #{include := list(),
-      ignore := list(),
-      output := list(),
+%%%================================================================================================
+%%% Parameter types, maps, defaults
+%%%================================================================================================
+-type cmd_param() :: include | ignore | output | otp | verbose | help.
+-type cmd_line_arg() :: string().
+-type cmd_line_arguments() :: [cmd_line_arg()].
+-type parsed_params() ::
+    #{include := list(string()),
+      ignore := list(string()),
+      output := list(string()),
       otp := boolean(),
       verbose := boolean(),
       help := boolean()
      }.
+-define(default_parsed_params,
+        #{include => [], ignore => [], output => [],
+          otp => false, verbose => false, help => false}).
 
 -type config() ::
-    #{explore := list(),
+    #{explore := list(file:filename()),
       output := string()
      }.
 
-allowed_commands() ->
+-spec allowed_cmd_params() -> [{cmd_param(), cmd_line_arguments()}].
+allowed_cmd_params() ->
     [
      {include, ["-i", "--include", "--"]},
      {ignore,  ["-g", "--ignore"]},
@@ -104,10 +114,15 @@ allowed_commands() ->
      {help,    ["-h", "--help"]}
     ].
 
+-type command_type() :: stateful | boolean.
+-spec get_command_type(Cmd :: atom()) -> command_type().
+get_command_type(C) when C=:=include; C=:=ignore; C=:=output -> stateful;
+get_command_type(B) when B=:=otp; B=:= verbose; B=:= help -> boolean.
+
 main(Args) ->
     log("Entering main. Args are ~p~n~n", [Args]),
-    Opts0 = reparse_arguments(Args),
-    Opts = clean_opts(Opts0),
+    ParsedArgs = reparse_args(?default_parsed_params, Args),
+    Opts = clean_opts(ParsedArgs),
     run(Opts).
 
 run(#{help := true}) ->
@@ -117,61 +132,55 @@ run(#{explore := Explore, output := TagFile}) ->
     ok = tags_to_file(EtsTags, TagFile),
     ets:delete(EtsTags).
 
--spec reparse_arguments([string()]) -> args().
-reparse_arguments(Args) ->
-    EmptyOpts = #{include => [],
-                  ignore => [],
-                  output => [],
-                  otp => false,
-                  verbose => false,
-                  help => false},
-    fill_args(EmptyOpts, Args).
-
--spec fill_args(args(), [string()]) -> args().
-fill_args(Opts, []) ->
+-spec reparse_args(parsed_params(), cmd_line_arguments()) -> parsed_params().
+reparse_args(Opts, []) ->
     Opts;
-fill_args(Opts, [Arg | OtherArgs] = Args) ->
-    {ok, Param, ParsedArgs} =
-        case parse_arg(Arg) of
-            {ok, P} -> {ok, P, OtherArgs};
-            %% If the parameter is not recognised, just throw it into include
-            {include, Arg} -> {ok, include, Args}
-        end,
-    {StateArgs, Rest} = get_full_arg_state(Param, ParsedArgs),
-    NewState = case StateArgs of
-                   true -> true;
-                   In when is_list(In) -> maps:get(Param, Opts, []) ++ In
-               end,
-    fill_args(Opts#{Param := NewState}, Rest).
+reparse_args(Opts, AllArgs) ->
+    {Param, ToContinueParsing} = parse_next_arg(AllArgs),
+    {ParamState, NextArgs} = case get_command_type(Param) of
+        boolean -> {true, ToContinueParsing};
+        stateful -> get_full_arg_state(Param, maps:get(Param, Opts, []), ToContinueParsing)
+    end,
+    reparse_args(Opts#{Param := ParamState}, NextArgs).
 
--spec parse_arg(string()) -> {ok, atom()} | {include, term()} | {error, unrecognised_parameter}.
-parse_arg(Arg) ->
+-spec parse_next_arg(nonempty_list(cmd_line_arg())) -> {cmd_param(), cmd_line_arguments()}.
+parse_next_arg([Arg | NextArgs] = AllArgs) ->
     lists:foldl(
-      fun({State, StateList}, Acc) ->
-              case lists:member(Arg, StateList) of
-                  true -> {ok, State};
+      fun({Param, ParamList}, Acc) ->
+              case lists:member(Arg, ParamList) of
+                  true -> {Param, NextArgs};
                   _ -> Acc
               end
       end,
-      {include, Arg}, %% If the parameter is not recognised, just throw it into include
-      allowed_commands()).
+      {include, AllArgs}, %% If the parameter is not recognised, just throw it into include
+      allowed_cmd_params()).
 
--spec get_full_arg_state(atom(), [string()]) -> {boolean() | [string()], [string()]}.
-get_full_arg_state(S, Args) when S =:= otp; S =:= help; S =:= verbose ->
-    {true, Args};
-get_full_arg_state(S, Args) ->
-    log("Parsing Args for State ~p~n", [S]),
-    {StateArgs, _Rest} = Ret = consume_until_new_state(Args),
+%% Return args for the current parameter, and the rest of the args to continue parsing
+-spec get_full_arg_state(Param, CurrentParamState, ToContinueParsing) -> Ret when
+    Param :: cmd_param(),
+    CurrentParamState :: cmd_line_arguments(),
+    ToContinueParsing :: cmd_line_arguments(),
+    Ret :: {boolean(), cmd_line_arguments()}
+         | {cmd_line_arguments(), cmd_line_arguments()}.
+get_full_arg_state(Param, _CurrentParamState, ToContinueParsing)
+  when Param =:= otp; Param =:= help; Param =:= verbose ->
+    {true, ToContinueParsing};
+get_full_arg_state(Param, CurrentParamState, ToContinueParsing) ->
+    log("Parsing args for parameter ~p~n", [Param]),
+    {StateArgs, Rest} = consume_until_new_state(ToContinueParsing),
     case StateArgs of
-        [] -> log_error("Arguments needed for ~s.~n", [S]);
+        [] -> log_error("Arguments needed for ~s.~n", [Param]);
         _ -> ok
     end,
-    Ret.
+    {StateArgs ++ CurrentParamState, Rest}.
 
--spec consume_until_new_state([string()]) -> {[string()], [string()]}.
+-spec consume_until_new_state(Args) -> {ConsumedArgs, RestArgs} when
+      Args :: cmd_line_arguments(),
+      ConsumedArgs :: cmd_line_arguments(),
+      RestArgs :: cmd_line_arguments().
 consume_until_new_state(Args) ->
-    log("Args are ~p~n", [Args]),
-    States = lists:foldl(fun({_,S}, Acc) -> S ++ Acc end, [], allowed_commands()),
+    log("    Consuming args ~p~n", [Args]),
+    States = lists:foldl(fun({_,S}, Acc) -> S ++ Acc end, [], allowed_cmd_params()),
     lists:splitwith(
       fun("-" ++ _ = El) ->
               case lists:member(El, States) of
@@ -182,7 +191,7 @@ consume_until_new_state(Args) ->
               not lists:member(El, States)
       end, Args).
 
--spec clean_opts(args()) -> config().
+-spec clean_opts(parsed_params()) -> config().
 clean_opts(#{help := [_]}) ->
     #{help => true};
 clean_opts(#{verbose := true} = Opts0) ->
