@@ -254,7 +254,7 @@ create_tags(Explore) ->
                        {read_concurrency,false}
                       ]),
     log("EtsTags table created.~n"),
-    log("Starting processing of files~n", []),
+    log("Starting processing of files~n"),
     Processes = process_filenames(Explore, EtsTags, []),
     lists:foreach(
       fun({Pid, Ref}) ->
@@ -269,6 +269,11 @@ create_tags(Explore) ->
 
 % Go through the given files: scan the Erlang files for tags
 % Here we now for sure that `Files` are indeed files with extensions *.erl or *.hrl.
+-spec process_filenames(Files, EtsTags, Processes) -> RetProcesses when
+      Files :: [file:filename()],
+      EtsTags :: ets:tid(),
+      Processes :: [{pid(), reference()}],
+      RetProcesses :: [{pid(), reference()}].
 process_filenames([], _Tags, Processes) ->
     Processes;
 process_filenames([File|OtherFiles], EtsTags, Processes) ->
