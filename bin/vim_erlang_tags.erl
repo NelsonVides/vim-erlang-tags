@@ -100,7 +100,7 @@
 
 -type config() ::
     #{explore := list(file:filename()),
-      output := string()
+      output := file:filename()
      }.
 
 -spec allowed_cmd_params() -> [{cmd_param(), cmd_line_arguments()}].
@@ -192,7 +192,7 @@ consume_until_new_state(Args) ->
       end, Args).
 
 -spec clean_opts(parsed_params()) -> config().
-clean_opts(#{help := [_]}) ->
+clean_opts(#{help := true}) ->
     #{help => true};
 clean_opts(#{verbose := true} = Opts0) ->
     put(verbose, true),
@@ -215,6 +215,7 @@ clean_opts(#{include := Included, ignore := Ignored, output := [Output]}) ->
     log("Set includes to default current dir.~n"),
     #{explore => expand_includes_remove_ignored(Included, Ignored), output => Output}.
 
+-spec expand_includes_remove_ignored([string()], [string()]) -> [file:filename()].
 expand_includes_remove_ignored(Included, Ignored) ->
     AllIncluded = lists:foldl(fun(L,Acc) -> L++Acc end,[],expand_dirs(Included)),
     AllIgnored = lists:foldl(fun(L,Acc) -> L++Acc end,[],expand_dirs(Ignored)),
@@ -243,6 +244,7 @@ expand_dirs(Included) ->
 %%%================================================================================================
 
 % Read the given Erlang source files and return an ets table that contains the appropriate tags.
+-spec create_tags([file:filename()]) -> ets:tid().
 create_tags(Explore) ->
     log("In create_tags, To explore: ~p~n", [Explore]),
     EtsTags = ets:new(tags,
