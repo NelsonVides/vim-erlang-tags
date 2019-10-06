@@ -73,6 +73,7 @@
                  end).
 
 -define(RE_FUNCTIONS,  ?COMPILE("^([a-z][a-zA-Z0-9_@]*)\\s*\\(")).
+-define(RE_FUNCT_NEW,  ?COMPILE("^([a-z][a-zA-Z0-9_@]*)\\s*(\\((?>[^()]|(?R))*\\))")).
 -define(RE_TYPESPECS1, ?COMPILE("^-\\s*(type|opaque)\\s*([a-zA-Z0-9_@]+)\\b")).
 -define(RE_TYPESPECS2, ?COMPILE("^-\\s*(type|opaque)\\s*'([^ \\t']+)'")).
 -define(RE_DEFINES1,   ?COMPILE("^-\\s*(record|define)\\s*\\(?\\s*([a-zA-Z0-9_@]+)\\b")).
@@ -83,16 +84,24 @@
 %%%=============================================================================
 %%% Parameter types, maps, defaults
 %%%============================================================================
--type cmd_param() :: include | ignore | output | otp | verbose | help.
+-type command_type() :: stack | single_state | boolean.
+-type command_type_stack() :: include | ignore | output.
+-type command_type_single() :: match_mode.
+-type command_type_boolean() :: otp | verbose | help.
+-type cmd_param() :: command_type_stack() |
+                     command_type_single() |
+                     command_type_boolean().
 -type cmd_line_arg() :: string().
 -type cmd_line_arguments() :: [cmd_line_arg()].
+-type match_mode() :: func_name_only | full_func_name_args.
 -type parsed_params() ::
     #{include := list(string()),
       ignore := list(string()),
       output := list(string()),
       otp := boolean(),
       verbose := boolean(),
-      help := boolean()
+      help := boolean(),
+      match_mode := match_mode()
      }.
 -define(DEFAULT_PARSED_PARAMS,
         #{include => [],
@@ -100,10 +109,12 @@
           output => [],
           otp => false,
           verbose => false,
-          help => false}).
+          help => false,
+          match_mode => func_name_only}).
 
 -type config() ::
     #{explore := list(file:filename()),
+      match_mode := match_mode(),
       output := file:filename()
      }.
 
@@ -115,37 +126,38 @@ allowed_cmd_params() ->
      {output,  ["-o", "--output"]},
      {otp,     ["-p", "--otp"]},
      {verbose, ["-v", "--verbose"]},
-     {help,    ["-h", "--help"]}
+     {help,    ["-h", "--help"]},
+     {match_mode,["-m","--match-mode"]}
     ].
 
--type command_type() :: stateful | boolean.
 -spec get_command_type(Cmd :: cmd_param()) -> command_type().
 get_command_type(C) when C =:= include;
                          C =:= ignore;
                          C =:= output ->
-    stateful;
-get_command_type(B) when B =:= otp;
-                         B =:= verbose;
-                         B =:= help ->
-    boolean.
+    stack;
+get_command_type(C) when C =:= otp;
+                         C =:= verbose;
+                         C=:= help ->
+    boolean;
+get_command_type(C) when C =:= match_mode ->
+    single_state.
 
 main(Args) ->
     log("Entering main. Args are ~p~n~n", [Args]),
     ParsedArgs = reparse_args(?DEFAULT_PARSED_PARAMS, Args),
-    set_verbose_flag(ParsedArgs),
+    set_verbose_flag(maps:get(verbose, ParsedArgs, false)),
     Opts = clean_opts(ParsedArgs),
     run(Opts).
 
 run(#{help := true}) ->
     print_help();
-run(#{explore := Explore, output := TagFile}) ->
-    EtsTags = create_tags(Explore),
+run(#{explore := Explore, output := TagFile, match_mode := MM}) ->
+    EtsTags = create_tags(Explore, MM),
     ok = tags_to_file(EtsTags, TagFile),
     ets:delete(EtsTags).
 
-set_verbose_flag(#{verbose := Verbose}) ->
-    put(verbose, Verbose),
-    log("Verbose mode on.~n").
+set_verbose_flag(Verbose) ->
+    put(verbose, Verbose).
 
 -spec reparse_args(parsed_params(), cmd_line_arguments()) -> parsed_params().
 reparse_args(Opts, []) ->
@@ -156,10 +168,12 @@ reparse_args(Opts, AllArgs) ->
         case get_command_type(Param) of
             boolean ->
                 {true, ToContinueParsing};
-            stateful ->
-                get_full_arg_state(
+            single_state ->
+                {hd(ToContinueParsing), tl(ToContinueParsing)};
+            stack ->
+                get_all_args_for_param(
                   Param, maps:get(Param, Opts, []), ToContinueParsing)
-        end,
+    end,
     reparse_args(Opts#{Param := ParamState}, NextArgs).
 
 -spec parse_next_arg(nonempty_list(cmd_line_arg())) ->
@@ -177,16 +191,13 @@ parse_next_arg([Arg | NextArgs] = AllArgs) ->
 
 %% Return args for the current parameter,
 %% and the rest of the args to continue parsing
--spec get_full_arg_state(Param, CurrentParamState, ToContinueParsing) -> Ret
-    when Param :: cmd_param(),
+-spec get_all_args_for_param(Param, CurrentParamState, ToContinueParsing) -> Ret
+    when Param :: command_type_stack(),
          CurrentParamState :: cmd_line_arguments(),
          ToContinueParsing :: cmd_line_arguments(),
          Ret :: {boolean(), cmd_line_arguments()}
          | {cmd_line_arguments(), cmd_line_arguments()}.
-get_full_arg_state(Param, _CurrentParamState, ToContinueParsing)
-  when Param =:= otp; Param =:= help; Param =:= verbose ->
-    {true, ToContinueParsing};
-get_full_arg_state(Param, CurrentParamState, ToContinueParsing) ->
+get_all_args_for_param(Param, CurrentParamState, ToContinueParsing) ->
     log("Parsing args for parameter ~p~n", [Param]),
     {StateArgs, Rest} = consume_until_new_command(ToContinueParsing),
     case StateArgs of
@@ -225,13 +236,19 @@ clean_opts(#{otp := true, include := Inc} = Opts0) ->
     Opts1 = maps:update(include, AllIncludes, Opts0),
     Opts2 = maps:update(otp, false, Opts1),
     clean_opts(Opts2);
+clean_opts(#{match_mode := GivenMode} = Opts0)
+  when GivenMode =:= "full_name_only"; GivenMode =:= "full_func_name_args" ->
+    Opts1 = maps:update(match_mode, list_to_existing_atom(GivenMode), Opts0),
+    clean_opts(Opts1);
 clean_opts(#{output := []} = Opts0) ->
     log("Set output to default 'tags'.~n"),
     clean_opts(Opts0#{output := ["tags"]});
-clean_opts(#{include := Included, ignore := Ignored, output := [Output]}) ->
+clean_opts(#{include := Included, ignore := Ignored, output := [Output], match_mode := MM}) ->
     log("Set includes to default current dir.~n"),
     #{explore => to_explore_as_include_minus_ignored(Included, Ignored),
-      output => Output}.
+      output => Output,
+      match_mode => MM
+     }.
 
 %% This function expands all the paths given in included and in ignored to
 %% actual filenames, and then subtracts the excluded ones from the included
@@ -262,18 +279,18 @@ expand_dirs_or_filenames(FileName) ->
 %%%================================================================================================
 
 % Read the given Erlang source files and return an ets table that contains the appropriate tags.
--spec create_tags([file:filename()]) -> ets:tid().
-create_tags(Explore) ->
+-spec create_tags([file:filename()], match_mode()) -> ets:tid().
+create_tags(Explore, MM) ->
     log("In create_tags, To explore: ~p~n", [Explore]),
     EtsTags = ets:new(tags,
-                      [set,
+                      [bag,
                        public,
                        {write_concurrency,true},
                        {read_concurrency,false}
                       ]),
     log("EtsTags table created.~n"),
     log("Starting processing of files~n"),
-    Processes = process_filenames(Explore, EtsTags, []),
+    Processes = process_filenames(Explore, MM, EtsTags, []),
     lists:foreach(
       fun({Pid, Ref}) ->
               receive
@@ -287,25 +304,26 @@ create_tags(Explore) ->
 
 % Go through the given files: scan the Erlang files for tags
 % Here we now for sure that `Files` are indeed files with extensions *.erl or *.hrl.
--spec process_filenames(Files, EtsTags, Processes) -> RetProcesses when
+-spec process_filenames(Files, MM, EtsTags, Processes) -> RetProcesses when
       Files :: [file:filename()],
+      MM :: match_mode(),
       EtsTags :: ets:tid(),
       Processes :: [{pid(), reference()}],
       RetProcesses :: [{pid(), reference()}].
-process_filenames([], _Tags, Processes) ->
+process_filenames([], _MM, _Tags, Processes) ->
     Processes;
-process_filenames([File|OtherFiles], EtsTags, Processes) ->
+process_filenames([File|OtherFiles], MM, EtsTags, Processes) ->
     Verbose = get(verbose),
-    P = spawn_monitor(fun() -> add_tags_from_file(File, EtsTags, Verbose) end),
-    process_filenames(OtherFiles, EtsTags, [P | Processes]).
+    P = spawn_monitor(fun() -> add_tags_from_file(File, EtsTags, MM, Verbose) end),
+    process_filenames(OtherFiles, MM, EtsTags, [P | Processes]).
 
 %%%=============================================================================
 %%% Scan a file or line for tags
 %%%=============================================================================
 
 % Read the given Erlang source file and add the appropriate tags to the EtsTags ets table.
-add_tags_from_file(File, EtsTags, Verbose) ->
-    put(verbose, Verbose),
+add_tags_from_file(File, EtsTags, MM, Verbose) ->
+    set_verbose_flag(Verbose),
     log("~nProcessing file: ~s~n", [File]),
 
     BaseName = filename:basename(File), % e.g. "mymod.erl"
@@ -313,15 +331,19 @@ add_tags_from_file(File, EtsTags, Verbose) ->
     add_file_tag(EtsTags, File, BaseName, ModName),
 
     case file:read_file(File) of
-        {ok, Contents} -> ok = scan_tags(Contents, {EtsTags, File, ModName});
+        {ok, Contents} -> ok = scan_tags(Contents, MM, {EtsTags, File, ModName});
         Err -> log_error("File ~s not readable: ~p~n", [File, Err])
     end.
 
-scan_tags(Contents, {EtsTags, File, ModName}) ->
+scan_tags(Contents, MM, {EtsTags, File, ModName}) ->
+    FuncRegex = case MM of
+                    func_name_only -> ?RE_FUNCTIONS;
+                    full_func_name_args -> ?RE_FUNCT_NEW
+                end,
     scan_tags_core(
-      Contents, ?RE_FUNCTIONS,
-      fun([_, FuncName]) ->
-              add_func_tags(EtsTags, File, ModName, FuncName)
+      Contents, FuncRegex,
+      fun(Match) ->
+              add_func_tags(EtsTags, File, ModName, Match, MM)
       end),
     scan_tags_core(
       Contents, ?RE_TYPESPECS1,
@@ -377,7 +399,12 @@ add_file_tag(EtsTags, File, BaseName, ModName) ->
     end.
 
 % File contains the function ModName:FuncName; add this information to EtsTags.
-add_func_tags(EtsTags, File, ModName, FuncName) ->
+add_func_tags(EtsTags, File, ModName, [_, FuncName, Args], full_func_name_args) ->
+    log("Function definition found: ~s~n      ~s~n", [FuncName, Args]),
+    TagVal = ["/^", FuncName, Args, "/"],
+    add_tag(EtsTags, [ModName, ":", FuncName], File, TagVal, global, $f),
+    add_tag(EtsTags, FuncName, File, TagVal, local, $f);
+add_func_tags(EtsTags, File, ModName, [_,FuncName], func_name_only) ->
 
     log("Function definition found: ~s~n", [FuncName]),
 
@@ -447,7 +474,7 @@ add_record_or_macro_tag(EtsTags, File, Attribute, Name, InnerPattern) ->
             Scope, Kind).
 
 add_tag(EtsTags, Tag, File, TagAddress, Scope, Kind) ->
-    ets:insert_new(EtsTags, {{Tag, File, Scope, Kind}, TagAddress}).
+    ets:insert(EtsTags, {{Tag, File, Scope, Kind}, TagAddress}).
 
 %%%=============================================================================
 %%% Writing tags into a file
