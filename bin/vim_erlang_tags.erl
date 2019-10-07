@@ -153,6 +153,7 @@ run(#{help := true}) ->
     print_help();
 run(#{explore := Explore, output := TagFile, match_mode := MM}) ->
     EtsTags = create_tags(Explore, MM),
+    log("Tags created, time to save to file! :)"),
     ok = tags_to_file(EtsTags, TagFile),
     ets:delete(EtsTags).
 
@@ -282,23 +283,35 @@ expand_dirs_or_filenames(FileName) ->
 -spec create_tags([file:filename()], match_mode()) -> ets:tid().
 create_tags(Explore, MM) ->
     log("In create_tags, To explore: ~p~n", [Explore]),
-    EtsTags = ets:new(tags,
-                      [bag,
-                       public,
-                       {write_concurrency,true},
-                       {read_concurrency,false}
-                      ]),
-    log("EtsTags table created.~n"),
-    log("Starting processing of files~n"),
+    EtsTags = case MM of
+                  func_name_only ->
+                      ets:new(tags,
+                              [set, public,
+                               {write_concurrency,true},
+                               {read_concurrency,false}
+                              ]);
+                  full_func_name_args ->
+                      ets:new(tags,
+                              [bag, public,
+                               {write_concurrency,true},
+                               {read_concurrency,false}
+                              ])
+              end,
+    log("EtsTags table created.~nStart Processing of files~n"),
     Processes = process_filenames(Explore, MM, EtsTags, []),
+    HowMany = length(Processes),
+    log("Waiting for ~p files to be processed ~n", [HowMany]),
+    timer:sleep(HowMany div 2),
+    log("Main process info: ~p~n", [erlang:process_info(self(), message_queue_len)]),
     lists:foreach(
       fun({Pid, Ref}) ->
               receive
                   {'DOWN', Ref, process, Pid, normal} -> ok
-              after 5000 -> error("Some process takes to long")
+              after 30000 -> error("Some process takes too long")
               end
       end,
       Processes),
+    log("All files processed~n", []),
     EtsTags.
 
 
