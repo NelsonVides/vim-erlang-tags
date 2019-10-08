@@ -86,8 +86,8 @@
 %%%============================================================================
 -type command_type() :: stack | single_state | boolean.
 -type command_type_stack() :: include | ignore | output.
--type command_type_single() :: match_mode.
--type command_type_boolean() :: otp | verbose | help.
+-type command_type_single() :: match_mode | verbose.
+-type command_type_boolean() :: otp | help.
 -type cmd_param() :: command_type_stack() |
                      command_type_single() |
                      command_type_boolean().
@@ -99,7 +99,7 @@
       ignore := list(string()),
       output := list(string()),
       otp := boolean(),
-      verbose := boolean(),
+      verbose := 0..2,
       help := boolean(),
       match_mode := match_mode()
      }.
@@ -108,7 +108,7 @@
           ignore => [],
           output => [],
           otp => false,
-          verbose => false,
+          verbose => 0,
           help => false,
           match_mode => func_name_only}).
 
@@ -136,16 +136,16 @@ get_command_type(C) when C =:= include;
                          C =:= output ->
     stack;
 get_command_type(C) when C =:= otp;
-                         C =:= verbose;
                          C=:= help ->
     boolean;
-get_command_type(C) when C =:= match_mode ->
+get_command_type(C) when C =:= match_mode;
+                         C =:= verbose ->
     single_state.
 
 main(Args) ->
     log("Entering main. Args are ~p~n~n", [Args]),
     ParsedArgs = reparse_args(?DEFAULT_PARSED_PARAMS, Args),
-    set_verbose_flag(maps:get(verbose, ParsedArgs, false)),
+    set_verbose_flag(maps:get(verbose, ParsedArgs, 0)),
     Opts = clean_opts(ParsedArgs),
     run(Opts).
 
@@ -157,7 +157,9 @@ run(#{explore := Explore, output := TagFile, match_mode := MM}) ->
     ok = tags_to_file(EtsTags, TagFile),
     ets:delete(EtsTags).
 
-set_verbose_flag(Verbose) ->
+set_verbose_flag(Verbose) when is_list(Verbose) ->
+    put(verbose, list_to_integer(Verbose));
+set_verbose_flag(Verbose) when is_integer(Verbose)->
     put(verbose, Verbose).
 
 -spec reparse_args(parsed_params(), cmd_line_arguments()) -> parsed_params().
@@ -245,7 +247,6 @@ clean_opts(#{output := []} = Opts0) ->
     log("Set output to default 'tags'.~n"),
     clean_opts(Opts0#{output := ["tags"]});
 clean_opts(#{include := Included, ignore := Ignored, output := [Output], match_mode := MM}) ->
-    log("Set includes to default current dir.~n"),
     #{explore => to_explore_as_include_minus_ignored(Included, Ignored),
       output => Output,
       match_mode => MM
@@ -330,7 +331,7 @@ explore_files(Explore, MM, EtsTags) ->
 process_filenames([], _MM, _Tags, Processes) ->
     Processes;
 process_filenames([File|OtherFiles], MM, EtsTags, Processes) ->
-    Verbose = get(verbose),
+    Verbose = get(verbose) - 1,
     P = spawn_monitor(fun() -> add_tags_from_file(File, EtsTags, MM, Verbose) end),
     process_filenames(OtherFiles, MM, EtsTags, [P | Processes]).
 
@@ -540,7 +541,7 @@ log(Format) ->
     log(Format, []).
 log(Format, Data) ->
     case get(verbose) of
-        true ->
+        N when N >= 1 ->
             io:format(Format, Data);
         _ ->
             ok
