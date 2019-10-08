@@ -298,6 +298,11 @@ create_tags(Explore, MM) ->
                               ])
               end,
     log("EtsTags table created.~nStart Processing of files~n"),
+    explore_files(Explore, MM, EtsTags),
+    log("All files processed~n", []),
+    EtsTags.
+
+explore_files(Explore, MM, EtsTags) ->
     Processes = process_filenames(Explore, MM, EtsTags, []),
     HowMany = length(Processes),
     log("Waiting for ~p files to be processed ~n", [HowMany]),
@@ -307,13 +312,12 @@ create_tags(Explore, MM) ->
       fun({Pid, Ref}) ->
               receive
                   {'DOWN', Ref, process, Pid, normal} -> ok
-              after 30000 -> error("Some process takes too long")
+              after 5000 ->
+                        log_error("Late Pid ~p~n", [erlang:process_info(Pid)]),
+                        error("Some process takes too long")
               end
       end,
-      Processes),
-    log("All files processed~n", []),
-    EtsTags.
-
+      Processes).
 
 % Go through the given files: scan the Erlang files for tags
 % Here we now for sure that `Files` are indeed files with extensions *.erl or *.hrl.
@@ -389,7 +393,22 @@ scan_tags_core(Contents, Pattern, Fun) ->
         nomatch ->
             ok;
         {match, Matches} ->
-            lists:foreach(Fun, Matches)
+            case length(Matches) >= 1000 of
+                true ->
+                    {ToMatch, _} = lists:foldl(
+                                fun([_,NewFunc|_] = El, {[[_,FuncName|_]|_]=L,N}) ->
+                                        case {NewFunc =:= FuncName, N < 20} of
+                                            {false, _} -> {[El | L], 0};
+                                            {true, true} -> {[El | L], N+1};
+                                            {true, false} -> {L, N}
+                                        end;
+                                   (El, {[], N}) -> {[El], N}
+                                end,
+                                {[], 0},
+                               Matches),
+                    lists:foreach(Fun, ToMatch);
+                _ -> lists:foreach(Fun, Matches)
+            end
     end.
 
 %%%=============================================================================
@@ -412,7 +431,8 @@ add_file_tag(EtsTags, File, BaseName, ModName) ->
     end.
 
 % File contains the function ModName:FuncName; add this information to EtsTags.
-add_func_tags(EtsTags, File, ModName, [_, FuncName, Args], full_func_name_args) ->
+add_func_tags(EtsTags, File, ModName, [_, FuncName, UnsafeArgs], full_func_name_args) ->
+    Args = binary:replace(UnsafeArgs, <<"\n">>, <<"\\n">>, [global]),
     log("Function definition found: ~s~n      ~s~n", [FuncName, Args]),
     TagVal = ["/^", FuncName, Args, "/"],
     add_tag(EtsTags, [ModName, ":", FuncName], File, TagVal, global, $f),
