@@ -331,7 +331,7 @@ explore_files(Explore, MM, EtsTags) ->
 process_filenames([], _MM, _Tags, Processes) ->
     Processes;
 process_filenames([File|OtherFiles], MM, EtsTags, Processes) ->
-    Verbose = get(verbose) - 1,
+    Verbose = case get(verbose) of X when X =:=0 -> 0; Y -> Y end,
     P = spawn_monitor(fun() -> add_tags_from_file(File, EtsTags, MM, Verbose) end),
     process_filenames(OtherFiles, MM, EtsTags, [P | Processes]).
 
